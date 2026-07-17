@@ -129,8 +129,6 @@ class OceanAudioSystem {
 const oceanSynth = typeof window !== "undefined" ? new OceanAudioSystem() : null;
 
 const globalActiveRipples: Array<{ x: number; z: number; time: number }> = [];
-
-// A global reference tracking the real-time position of all bottles for fast collision comparisons
 const globalBottlePositions: Map<number, THREE.Vector3> = new Map();
 
 // ==========================================
@@ -286,7 +284,7 @@ function PhysicalBottle({ message, index, focusedId, onFocus }: BottleProps) {
     posY: message.isNew ? 6.0 : 0.0,
     posZ: message.z,
     velY: message.isNew ? -0.15 : 0,
-    driftOffsetX: 0, // Drifting shifts caused by collisions
+    driftOffsetX: 0, 
     driftOffsetZ: 0,
     hasSplashed: !message.isNew,
     isReturning: false,
@@ -299,12 +297,10 @@ function PhysicalBottle({ message, index, focusedId, onFocus }: BottleProps) {
     if (!groupRef.current || !innerRef.current) return;
     const time = state.clock.getElapsedTime();
 
-    // Collision Separation System Setup
     const currentX = physics.current.posX + physics.current.driftOffsetX;
     const currentZ = physics.current.posZ + physics.current.driftOffsetZ;
-    const bottleRadius = 0.14; // Diameter threshold bounds matches geometric meshes
+    const bottleRadius = 0.14; 
 
-    // Scan global coordinate registry for nearby intersections
     globalBottlePositions.forEach((pos, id) => {
       if (id !== message.id) {
         const dx = currentX - pos.x;
@@ -313,16 +309,13 @@ function PhysicalBottle({ message, index, focusedId, onFocus }: BottleProps) {
         const minDistance = bottleRadius * 2;
 
         if (distance < minDistance && distance > 0) {
-          // Calculate separation force vector direction
           const overlap = minDistance - distance;
           const forceX = (dx / distance) * overlap * 0.15;
           const forceZ = (dz / distance) * overlap * 0.15;
 
-          // Push bottle targets dynamically out of interception bounds
           physics.current.driftOffsetX += forceX;
           physics.current.driftOffsetZ += forceZ;
 
-          // Play a tiny subtle water clink splash sound when they touch
           if (time % 2.0 < 0.02 && oceanSynth) {
             oceanSynth.playSplashSound();
           }
@@ -330,7 +323,6 @@ function PhysicalBottle({ message, index, focusedId, onFocus }: BottleProps) {
       }
     });
 
-    // Bring ambient drift slowly back into orbital equilibrium path lines
     physics.current.driftOffsetX = THREE.MathUtils.lerp(physics.current.driftOffsetX, 0, 0.01);
     physics.current.driftOffsetZ = THREE.MathUtils.lerp(physics.current.driftOffsetZ, 0, 0.01);
 
@@ -374,7 +366,6 @@ function PhysicalBottle({ message, index, focusedId, onFocus }: BottleProps) {
       physics.current.posZ = THREE.MathUtils.lerp(physics.current.posZ, 1.2, 0.09);
     } 
     else {
-      // Apply ocean circular tidal drift current vector orbits over time
       const waveState = calculateGerstnerWave(resolvedX, resolvedZ, time);
       
       const microBob = Math.sin(time * 3.5 + index) * 0.015;
@@ -391,8 +382,6 @@ function PhysicalBottle({ message, index, focusedId, onFocus }: BottleProps) {
     }
 
     groupRef.current.position.set(resolvedX, physics.current.posY, resolvedZ);
-
-    // Broadcast current position vectors to the global coordinate registry map
     globalBottlePositions.set(message.id, groupRef.current.position.clone());
 
     if (isTarget && !physics.current.isReturning) {
@@ -408,7 +397,6 @@ function PhysicalBottle({ message, index, focusedId, onFocus }: BottleProps) {
     lastIsTarget.current = isTarget;
   });
 
-  // Clean up registration on component unmount
   useEffect(() => {
     return () => {
       globalBottlePositions.delete(message.id);
@@ -420,13 +408,34 @@ function PhysicalBottle({ message, index, focusedId, onFocus }: BottleProps) {
 
   return (
     <group ref={groupRef}>
+      {/* 
+        This is the main interaction entry block. 
+        We attach pointer events and create a wide invisible interaction shield.
+      */}
       <group 
         ref={innerRef}
         onClick={(e) => {
           e.stopPropagation();
           if (!physics.current.isReturning) onFocus(message);
         }}
+        onPointerOver={(e) => {
+          e.stopPropagation();
+          if (!physics.current.isReturning && !isAnyFocused) {
+            document.body.style.cursor = "pointer";
+          }
+        }}
+        onPointerOut={(e) => {
+          e.stopPropagation();
+          document.body.style.cursor = "default";
+        }}
       >
+        {/* INVISIBLE CLICK RECEPTOR SHIELD - Increases raycasting hit accuracy on bobbing waves */}
+        <mesh position={[0, 0.08, 0]}>
+          <cylinderGeometry args={[0.22, 0.22, 0.45, 12]} />
+          <meshBasicMaterial transparent opacity={0.0} wireframe={false} depthWrite={false} />
+        </mesh>
+
+        {/* VISUAL GEOMETRY COMPONENT PIECES */}
         <mesh position={[0, -0.04, 0]}>
           <cylinderGeometry args={[0.072, 0.076, 0.32, 24]} />
           <meshPhysicalMaterial 
@@ -526,7 +535,6 @@ export default function MessageInABottle() {
       if (res.ok) {
         const data = await res.json();
         const mapped: Message[] = data.map((msg: any, idx: number) => {
-          // Give them randomized orbital paths so they naturally float past each other and collide
           const angle = (idx / data.length) * Math.PI * 2;
           const radius = 0.8 + (idx % 3) * 0.6;
           return {
@@ -709,7 +717,10 @@ export default function MessageInABottle() {
                 </button>
                 
                 <button
-                  onClick={() => setFocusedMessage(null)}
+                  onClick={() => {
+                    setFocusedMessage(null);
+                    document.body.style.cursor = "default";
+                  }}
                   className="flex items-center gap-1 text-[10px] text-orange-700 font-extrabold uppercase tracking-widest hover:text-orange-900 transition-colors"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
