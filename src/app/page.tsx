@@ -1,6 +1,6 @@
 /*
- *   Copyright (c) 2026 
- *   All rights reserved.
+ * Copyright (c) 2026 
+ * All rights reserved.
  */
 "use client";
 
@@ -130,6 +130,9 @@ const oceanSynth = typeof window !== "undefined" ? new OceanAudioSystem() : null
 
 const globalActiveRipples: Array<{ x: number; z: number; time: number }> = [];
 
+// A global reference tracking the real-time position of all bottles for fast collision comparisons
+const globalBottlePositions: Map<number, THREE.Vector3> = new Map();
+
 // ==========================================
 // 2. STEEP TROCHOIDAL GERSTNER WAVE SYSTEM
 // ==========================================
@@ -171,14 +174,13 @@ function calculateGerstnerWave(x: number, y: number, time: number): { position: 
 
     binormal.x -= d.x * d.y * (w.steepness * Math.sin(phase));
     binormal.y -= d.y * d.y * (w.steepness * Math.sin(phase));
-    binormal.z += d.y * (w.steepness * Math.cos(phase));
+    binormal.z += d.y * (w.steepness * Math.sin(phase));
 
-    // Update 1: Track crest sharpness profile for dynamic shading maps
     totalCrest += Math.sin(phase);
   });
 
   const normal = new THREE.Vector3().crossVectors(tangent, binormal).normalize();
-  const crestFactor = (totalCrest / WAVES.length + 1) / 2; // Normalized 0-1 peak tracking
+  const crestFactor = (totalCrest / WAVES.length + 1) / 2;
 
   return { position: p, normal, crestFactor };
 }
@@ -194,7 +196,6 @@ function GerstnerOceanMesh() {
     const posAttr = geom.attributes.position;
     const normAttr = geom.attributes.normal;
     
-    // Update 3: Efficient cached coordinate index resolution maps
     if (!geom.userData.initialPositions) {
       const initialPos = [];
       for (let i = 0; i < posAttr.count; i++) {
@@ -234,11 +235,9 @@ function GerstnerOceanMesh() {
     posAttr.needsUpdate = true;
     normAttr.needsUpdate = true;
 
-    // Update 3: Synchronize structural space matrices for accurate viewing clip tests
     geom.computeBoundingBox();
     geom.computeBoundingSphere();
 
-    // Update 1: Dynamic crest foam highlight tracking adjustments
     if (matRef.current) {
       const averageCrest = accumulatedCrest / posAttr.count;
       matRef.current.roughness = THREE.MathUtils.lerp(0.02, 0.18, averageCrest);
@@ -287,6 +286,8 @@ function PhysicalBottle({ message, index, focusedId, onFocus }: BottleProps) {
     posY: message.isNew ? 6.0 : 0.0,
     posZ: message.z,
     velY: message.isNew ? -0.15 : 0,
+    driftOffsetX: 0, // Drifting shifts caused by collisions
+    driftOffsetZ: 0,
     hasSplashed: !message.isNew,
     isReturning: false,
     returnProgress: 0.0,
@@ -298,29 +299,67 @@ function PhysicalBottle({ message, index, focusedId, onFocus }: BottleProps) {
     if (!groupRef.current || !innerRef.current) return;
     const time = state.clock.getElapsedTime();
 
+    // Collision Separation System Setup
+    const currentX = physics.current.posX + physics.current.driftOffsetX;
+    const currentZ = physics.current.posZ + physics.current.driftOffsetZ;
+    const bottleRadius = 0.14; // Diameter threshold bounds matches geometric meshes
+
+    // Scan global coordinate registry for nearby intersections
+    globalBottlePositions.forEach((pos, id) => {
+      if (id !== message.id) {
+        const dx = currentX - pos.x;
+        const dz = currentZ - pos.z;
+        const distance = Math.sqrt(dx * dx + dz * dz);
+        const minDistance = bottleRadius * 2;
+
+        if (distance < minDistance && distance > 0) {
+          // Calculate separation force vector direction
+          const overlap = minDistance - distance;
+          const forceX = (dx / distance) * overlap * 0.15;
+          const forceZ = (dz / distance) * overlap * 0.15;
+
+          // Push bottle targets dynamically out of interception bounds
+          physics.current.driftOffsetX += forceX;
+          physics.current.driftOffsetZ += forceZ;
+
+          // Play a tiny subtle water clink splash sound when they touch
+          if (time % 2.0 < 0.02 && oceanSynth) {
+            oceanSynth.playSplashSound();
+          }
+        }
+      }
+    });
+
+    // Bring ambient drift slowly back into orbital equilibrium path lines
+    physics.current.driftOffsetX = THREE.MathUtils.lerp(physics.current.driftOffsetX, 0, 0.01);
+    physics.current.driftOffsetZ = THREE.MathUtils.lerp(physics.current.driftOffsetZ, 0, 0.01);
+
+    const resolvedX = physics.current.posX + physics.current.driftOffsetX;
+    const resolvedZ = physics.current.posZ + physics.current.driftOffsetZ;
+
     if (!physics.current.hasSplashed) {
       physics.current.velY -= 0.012; 
       physics.current.posY += physics.current.velY;
       
-      const waveState = calculateGerstnerWave(message.x, message.z, time);
+      const waveState = calculateGerstnerWave(resolvedX, resolvedZ, time);
       if (physics.current.posY <= waveState.position.z) {
         physics.current.posY = waveState.position.z;
         physics.current.velY = 0;
         physics.current.hasSplashed = true;
         if (oceanSynth) oceanSynth.playSplashSound();
-        globalActiveRipples.push({ x: message.x, z: message.z, time });
+        globalActiveRipples.push({ x: resolvedX, z: resolvedZ, time });
       }
     } 
     else if (physics.current.isReturning) {
       physics.current.returnProgress += 0.045;
-      const waveState = calculateGerstnerWave(message.x, message.z, time);
+      const waveState = calculateGerstnerWave(resolvedX, resolvedZ, time);
       
       if (physics.current.returnProgress >= 1.0) {
         physics.current.returnProgress = 1.0;
         physics.current.isReturning = false;
         physics.current.posY = waveState.position.z;
         if (oceanSynth) oceanSynth.playSplashSound();
-        globalActiveRipples.push({ x: message.x, z: message.z, time });
+        globalActiveRipples.push({ x: resolvedX, z: resolvedZ, time });
       } else {
         const t = physics.current.returnProgress;
         const smoothT = t * t * (3 - 2 * t);
@@ -335,18 +374,15 @@ function PhysicalBottle({ message, index, focusedId, onFocus }: BottleProps) {
       physics.current.posZ = THREE.MathUtils.lerp(physics.current.posZ, 1.2, 0.09);
     } 
     else {
-      physics.current.posX = message.x;
-      physics.current.posZ = message.z;
-      const waveState = calculateGerstnerWave(message.x, message.z, time);
+      // Apply ocean circular tidal drift current vector orbits over time
+      const waveState = calculateGerstnerWave(resolvedX, resolvedZ, time);
       
-      // Update 2: Micro-bobbing displacement simulation matrix
       const microBob = Math.sin(time * 3.5 + index) * 0.015;
       physics.current.posY = waveState.position.z - 0.04 + microBob;
 
       const targetRotationX = Math.atan2(waveState.normal.y, waveState.normal.z) - Math.PI/2;
       const targetRotationZ = -Math.atan2(waveState.normal.x, waveState.normal.z);
       
-      // Update 2: Secondary fluid surface micro-sway vectors
       const microSwayX = Math.cos(time * 2.0 + index) * 0.02;
       const microSwayZ = Math.sin(time * 2.5 + index) * 0.02;
 
@@ -354,7 +390,10 @@ function PhysicalBottle({ message, index, focusedId, onFocus }: BottleProps) {
       innerRef.current.rotation.z = THREE.MathUtils.lerp(innerRef.current.rotation.z, targetRotationZ + microSwayZ, 0.1);
     }
 
-    groupRef.current.position.set(physics.current.posX, physics.current.posY, physics.current.posZ);
+    groupRef.current.position.set(resolvedX, physics.current.posY, resolvedZ);
+
+    // Broadcast current position vectors to the global coordinate registry map
+    globalBottlePositions.set(message.id, groupRef.current.position.clone());
 
     if (isTarget && !physics.current.isReturning) {
       innerRef.current.rotation.set(0.08, time * 0.2, 0);
@@ -368,6 +407,13 @@ function PhysicalBottle({ message, index, focusedId, onFocus }: BottleProps) {
     }
     lastIsTarget.current = isTarget;
   });
+
+  // Clean up registration on component unmount
+  useEffect(() => {
+    return () => {
+      globalBottlePositions.delete(message.id);
+    };
+  }, [message.id]);
 
   const isAnyFocused = focusedId !== null;
   const opacity = isAnyFocused ? (isTarget ? 1.0 : 0.05) : 0.95;
@@ -480,8 +526,9 @@ export default function MessageInABottle() {
       if (res.ok) {
         const data = await res.json();
         const mapped: Message[] = data.map((msg: any, idx: number) => {
+          // Give them randomized orbital paths so they naturally float past each other and collide
           const angle = (idx / data.length) * Math.PI * 2;
-          const radius = 1.3 + (idx % 3) * 0.45;
+          const radius = 0.8 + (idx % 3) * 0.6;
           return {
             ...msg,
             x: Math.cos(angle) * radius,
