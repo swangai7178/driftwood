@@ -1,3 +1,7 @@
+/*
+ *   Copyright (c) 2026 
+ *   All rights reserved.
+ */
 "use client";
 
 import { useRef, useState } from "react";
